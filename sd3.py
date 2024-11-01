@@ -5,8 +5,13 @@ import torch.nn as nn
 import logging
 
 
-from diffusers import SD3Transformer2DModel
 from diffusers.utils.import_utils import is_torch_version
+from diffusers.configuration_utils import ConfigMixin, register_to_config
+from diffusers.models.embeddings import CombinedTimestepTextProjEmbeddings, PatchEmbed
+from diffusers.models.attention import JointTransformerBlock
+from diffusers.models.normalization import AdaLayerNormContinuous
+from diffusers.loaders import FromOriginalModelMixin, PeftAdapterMixin
+from diffusers.models.modeling_utils import ModelMixin
 from modeling_output import Transformer2DModelOutput
 
 
@@ -14,115 +19,7 @@ logger = logging.getLogger("diffusers").setLevel(logging.ERROR)
 #logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-# class SD3ControlNextModel(SD3Transformer2DModel):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-        
-#     def forward(
-#         self,
-#         hidden_states: torch.FloatTensor,
-#         encoder_hidden_states: torch.FloatTensor = None,
-#         pooled_projections: torch.FloatTensor = None,
-#         timestep: torch.LongTensor = None,
-#         block_controlnet_hidden_states: List = None,
-#         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
-#         return_dict: bool = True,
-#     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
-#         """
-#         The [`SD3Transformer2DModel`] forward method.
-
-#         Args:
-#             hidden_states (`torch.FloatTensor` of shape `(batch size, channel, height, width)`):
-#                 Input `hidden_states`.
-#             encoder_hidden_states (`torch.FloatTensor` of shape `(batch size, sequence_len, embed_dims)`):
-#                 Conditional embeddings (embeddings computed from the input conditions such as prompts) to use.
-#             pooled_projections (`torch.FloatTensor` of shape `(batch_size, projection_dim)`): Embeddings projected
-#                 from the embeddings of input conditions.
-#             timestep ( `torch.LongTensor`):
-#                 Used to indicate denoising step.
-#             block_controlnet_hidden_states: (`list` of `torch.Tensor`):
-#                 A list of tensors that if specified are added to the residuals of transformer blocks.
-#             joint_attention_kwargs (`dict`, *optional*):
-#                 A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
-#                 `self.processor` in
-#                 [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
-#             return_dict (`bool`, *optional*, defaults to `True`):
-#                 Whether or not to return a [`~models.transformer_2d.Transformer2DModelOutput`] instead of a plain
-#                 tuple.
-
-#         Returns:
-#             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
-#             `tuple` where the first element is the sample tensor.
-#         """
-#         if joint_attention_kwargs is not None:
-#             joint_attention_kwargs = joint_attention_kwargs.copy()
-
-#         if joint_attention_kwargs is not None and joint_attention_kwargs.get("scale", None) is not None:
-#             logger.warning(
-#                 "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
-#             )
-
-#         height, width = hidden_states.shape[-2:]
-
-#         hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
-#         temb = self.time_text_embed(timestep, pooled_projections)
-#         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
-
-#         for index_block, block in enumerate(self.transformer_blocks):
-#             if self.training and self.gradient_checkpointing:
-
-#                 def create_custom_forward(module, return_dict=None):
-#                     def custom_forward(*inputs):
-#                         if return_dict is not None:
-#                             return module(*inputs, return_dict=return_dict)
-#                         else:
-#                             return module(*inputs)
-
-#                     return custom_forward
-
-#                 ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-#                 encoder_hidden_states, hidden_states = torch.utils.checkpoint.checkpoint(
-#                     create_custom_forward(block),
-#                     hidden_states,
-#                     encoder_hidden_states,
-#                     temb,
-#                     **ckpt_kwargs,
-#                 )
-
-#             else:
-#                 encoder_hidden_states, hidden_states = block(
-#                     hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
-#                 )
-
-#             # controlnet residual
-#             if block_controlnet_hidden_states is not None and block.context_pre_only is False:
-#                 interval_control = len(self.transformer_blocks) // len(block_controlnet_hidden_states)
-#                 hidden_states = hidden_states + block_controlnet_hidden_states[index_block // interval_control]
-
-#         hidden_states = self.norm_out(hidden_states, temb)
-#         hidden_states = self.proj_out(hidden_states)
-
-#         # unpatchify
-#         patch_size = self.config.patch_size
-#         height = height // patch_size
-#         width = width // patch_size
-
-#         hidden_states = hidden_states.reshape(
-#             shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.out_channels)
-#         )
-#         hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
-#         output = hidden_states.reshape(
-#             shape=(hidden_states.shape[0], self.out_channels, height * patch_size, width * patch_size)
-#         )
-
-
-#         if not return_dict:
-#             return (output,)
-
-#         return Transformer2DModelOutput(sample=output) 
-
-
-class SD3Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
+class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
     """
     The Transformer model introduced in Stable Diffusion 3.
 
@@ -203,151 +100,6 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
 
         self.gradient_checkpointing = False
 
-    # Copied from diffusers.models.unets.unet_3d_condition.UNet3DConditionModel.enable_forward_chunking
-    def enable_forward_chunking(self, chunk_size: Optional[int] = None, dim: int = 0) -> None:
-        """
-        Sets the attention processor to use [feed forward
-        chunking](https://huggingface.co/blog/reformer#2-chunked-feed-forward-layers).
-
-        Parameters:
-            chunk_size (`int`, *optional*):
-                The chunk size of the feed-forward layers. If not specified, will run feed-forward layer individually
-                over each tensor of dim=`dim`.
-            dim (`int`, *optional*, defaults to `0`):
-                The dimension over which the feed-forward computation should be chunked. Choose between dim=0 (batch)
-                or dim=1 (sequence length).
-        """
-        if dim not in [0, 1]:
-            raise ValueError(f"Make sure to set `dim` to either 0 or 1, not {dim}")
-
-        # By default chunk size is 1
-        chunk_size = chunk_size or 1
-
-        def fn_recursive_feed_forward(module: torch.nn.Module, chunk_size: int, dim: int):
-            if hasattr(module, "set_chunk_feed_forward"):
-                module.set_chunk_feed_forward(chunk_size=chunk_size, dim=dim)
-
-            for child in module.children():
-                fn_recursive_feed_forward(child, chunk_size, dim)
-
-        for module in self.children():
-            fn_recursive_feed_forward(module, chunk_size, dim)
-
-    # Copied from diffusers.models.unets.unet_3d_condition.UNet3DConditionModel.disable_forward_chunking
-    def disable_forward_chunking(self):
-        def fn_recursive_feed_forward(module: torch.nn.Module, chunk_size: int, dim: int):
-            if hasattr(module, "set_chunk_feed_forward"):
-                module.set_chunk_feed_forward(chunk_size=chunk_size, dim=dim)
-
-            for child in module.children():
-                fn_recursive_feed_forward(child, chunk_size, dim)
-
-        for module in self.children():
-            fn_recursive_feed_forward(module, None, 0)
-
-    @property
-    # Copied from diffusers.models.unets.unet_2d_condition.UNet2DConditionModel.attn_processors
-    def attn_processors(self) -> Dict[str, AttentionProcessor]:
-        r"""
-        Returns:
-            `dict` of attention processors: A dictionary containing all attention processors used in the model with
-            indexed by its weight name.
-        """
-        # set recursively
-        processors = {}
-
-        def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
-            if hasattr(module, "get_processor"):
-                processors[f"{name}.processor"] = module.get_processor()
-
-            for sub_name, child in module.named_children():
-                fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
-
-            return processors
-
-        for name, module in self.named_children():
-            fn_recursive_add_processors(name, module, processors)
-
-        return processors
-
-    # Copied from diffusers.models.unets.unet_2d_condition.UNet2DConditionModel.set_attn_processor
-    def set_attn_processor(self, processor: Union[AttentionProcessor, Dict[str, AttentionProcessor]]):
-        r"""
-        Sets the attention processor to use to compute attention.
-
-        Parameters:
-            processor (`dict` of `AttentionProcessor` or only `AttentionProcessor`):
-                The instantiated processor class or a dictionary of processor classes that will be set as the processor
-                for **all** `Attention` layers.
-
-                If `processor` is a dict, the key needs to define the path to the corresponding cross attention
-                processor. This is strongly recommended when setting trainable attention processors.
-
-        """
-        count = len(self.attn_processors.keys())
-
-        if isinstance(processor, dict) and len(processor) != count:
-            raise ValueError(
-                f"A dict of processors was passed, but the number of processors {len(processor)} does not match the"
-                f" number of attention layers: {count}. Please make sure to pass {count} processor classes."
-            )
-
-        def fn_recursive_attn_processor(name: str, module: torch.nn.Module, processor):
-            if hasattr(module, "set_processor"):
-                if not isinstance(processor, dict):
-                    module.set_processor(processor)
-                else:
-                    module.set_processor(processor.pop(f"{name}.processor"))
-
-            for sub_name, child in module.named_children():
-                fn_recursive_attn_processor(f"{name}.{sub_name}", child, processor)
-
-        for name, module in self.named_children():
-            fn_recursive_attn_processor(name, module, processor)
-
-    # Copied from diffusers.models.unets.unet_2d_condition.UNet2DConditionModel.fuse_qkv_projections with FusedAttnProcessor2_0->FusedJointAttnProcessor2_0
-    def fuse_qkv_projections(self):
-        """
-        Enables fused QKV projections. For self-attention modules, all projection matrices (i.e., query, key, value)
-        are fused. For cross-attention modules, key and value projection matrices are fused.
-
-        <Tip warning={true}>
-
-        This API is 🧪 experimental.
-
-        </Tip>
-        """
-        self.original_attn_processors = None
-
-        for _, attn_processor in self.attn_processors.items():
-            if "Added" in str(attn_processor.__class__.__name__):
-                raise ValueError("`fuse_qkv_projections()` is not supported for models having added KV projections.")
-
-        self.original_attn_processors = self.attn_processors
-
-        for module in self.modules():
-            if isinstance(module, Attention):
-                module.fuse_projections(fuse=True)
-
-        self.set_attn_processor(FusedJointAttnProcessor2_0())
-
-    # Copied from diffusers.models.unets.unet_2d_condition.UNet2DConditionModel.unfuse_qkv_projections
-    def unfuse_qkv_projections(self):
-        """Disables the fused QKV projection if enabled.
-
-        <Tip warning={true}>
-
-        This API is 🧪 experimental.
-
-        </Tip>
-
-        """
-        if self.original_attn_processors is not None:
-            self.set_attn_processor(self.original_attn_processors)
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        if hasattr(module, "gradient_checkpointing"):
-            module.gradient_checkpointing = value
 
     def forward(
         self,
@@ -391,14 +143,14 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         else:
             lora_scale = 1.0
 
-        if USE_PEFT_BACKEND:
-            # weight the lora layers by setting `lora_scale` for each PEFT layer
-            scale_lora_layers(self, lora_scale)
-        else:
-            if joint_attention_kwargs is not None and joint_attention_kwargs.get("scale", None) is not None:
-                logger.warning(
-                    "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
-                )
+        # if USE_PEFT_BACKEND:
+        #     # weight the lora layers by setting `lora_scale` for each PEFT layer
+        #     scale_lora_layers(self, lora_scale)
+        # else:
+        #     if joint_attention_kwargs is not None and joint_attention_kwargs.get("scale", None) is not None:
+        #         logger.warning(
+        #             "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
+        #         )
 
         height, width = hidden_states.shape[-2:]
 
@@ -431,7 +183,7 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
                 encoder_hidden_states, hidden_states = block(
                     hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
                 )
-
+            import pdb; pdb.set_trace()
             # controlnet residual
             if block_controlnet_hidden_states is not None and block.context_pre_only is False:
                 interval_control = len(self.transformer_blocks) // len(block_controlnet_hidden_states)
@@ -453,9 +205,9 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
             shape=(hidden_states.shape[0], self.out_channels, height * patch_size, width * patch_size)
         )
 
-        if USE_PEFT_BACKEND:
-            # remove `lora_scale` from each PEFT layer
-            unscale_lora_layers(self, lora_scale)
+        # if USE_PEFT_BACKEND:
+        #     # remove `lora_scale` from each PEFT layer
+        #     unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (output,)
