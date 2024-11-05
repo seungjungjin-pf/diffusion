@@ -189,8 +189,15 @@ def main():
     ]
     torch.save(tensor_list, 'prompt_tensors_list.pt')
     
-def get_precomputed_tensors(filename='prompt_tensors_list.pt'):
-    return torch.load(filename)
+def get_precomputed_tensors(device, filename='prompt_tensors_list.pt'):
+    tensor_list = torch.load(filename)
+    for data in tensor_list:
+        for key, value in data.items():
+            if key != 'prompt' and not isinstance(value, torch.Tensor):
+                data[key] = torch.tensor(data[key]).to(device)
+            if key in ['img', 'hint']:
+                data[key] = data[key].permute(2, 0, 1).unsqueeze(dim=0)
+    return tensor_list
     
     
 if __name__ == "__main__":

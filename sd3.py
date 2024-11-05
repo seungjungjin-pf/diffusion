@@ -18,6 +18,17 @@ from modeling_output import Transformer2DModelOutput
 logger = logging.getLogger("diffusers").setLevel(logging.ERROR)
 #logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+def get_sigmas(timesteps, noise_scheduler_copy, n_dim=4, dtype=torch.float32, device=None):
+    sigmas = noise_scheduler_copy.sigmas.to(device=device, dtype=dtype)
+    schedule_timesteps = noise_scheduler_copy.timesteps.to(device)
+    timesteps = timesteps.to(device)
+    step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+
+    sigma = sigmas[step_indices].flatten()
+    while len(sigma.shape) < n_dim:
+        sigma = sigma.unsqueeze(-1)
+    return sigma
+
 
 class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
     """
@@ -107,7 +118,7 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
         encoder_hidden_states: torch.FloatTensor = None,
         pooled_projections: torch.FloatTensor = None,
         timestep: torch.LongTensor = None,
-        block_controlnet_hidden_states: List = None,
+        controlnet_hidden_states: List = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
@@ -183,11 +194,12 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
                 encoder_hidden_states, hidden_states = block(
                     hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
                 )
-            import pdb; pdb.set_trace()
-            # controlnet residual
-            if block_controlnet_hidden_states is not None and block.context_pre_only is False:
-                interval_control = len(self.transformer_blocks) // len(block_controlnet_hidden_states)
-                hidden_states = hidden_states + block_controlnet_hidden_states[index_block // interval_control]
+            # # controlnet residual
+            if index_block == 0 and controlnet_hidden_states is not None and block.context_pre_only is False:
+                # interval_control = len(self.transformer_blocks) // len(block_controlnet_hidden_states)
+                # hidden_states = hidden_states + block_controlnet_hidden_states[index_block // interval_control]
+                hidden_states = hidden_states + controlnet_hidden_states
+        # raise NotImplementedError("controlnet_hidden_states not implemented")
 
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)

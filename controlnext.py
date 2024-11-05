@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
@@ -19,7 +20,8 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         in_channels = [128, 128],
         out_channels = [128, 256],
         groups = [4, 8],
-        controlnext_scale=1.
+        controlnext_scale=1.,
+        upscale_dim = None,
     ):
         super().__init__()
 
@@ -87,6 +89,10 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         ))
 
         self.scale = controlnext_scale
+        self.upscale_layer = None
+        self.upscale_dim = upscale_dim
+        if upscale_dim is not None:
+            self.upscale_layer = nn.Conv2d(in_channels=320, out_channels=1024, kernel_size=3, padding=1)
 
     def forward(
         self,
@@ -128,6 +134,15 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         
         sample = self.mid_convs[0](sample) + sample
         sample = self.mid_convs[1](sample)
+        
+       
+        if self.upscale_layer is not None:
+            sample = self.upscale_layer(sample)  # Shape becomes [1, 1024, 64, 64]
+
+            # Upsample spatial dimensions from 64x64 to 1536
+            sample = F.interpolate(sample, size=(self.upscale_dim, 1), mode='bilinear', align_corners=False)
+            sample = sample.squeeze(-1)  # Shape becomes [1, 1024, 1536]
+
         
         return {
             'output': sample,
