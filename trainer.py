@@ -106,8 +106,8 @@ def generate_image(transformer, vae, scheduler, text_embeddings, pooled_text_emb
             
             # Convert the numpy array to a PIL image
             pil_image = Image.fromarray((image[0] * 255).astype(np.uint8))
-            epoch = str(epoch).zfill(4)
-            index = str(index).zfill(4)
+            epoch = str(epoch+1).zfill(4)
+            index = str(index+1).zfill(4)
             pil_image.save(f"gen_images/{epoch}_{index}.png")
         
         # Predict the noise residual
@@ -143,10 +143,6 @@ def train():
     data_list = get_precomputed_tensors(device=device)
     data_list = [data_list[0]]
             
-    gradient_accumulation_steps = 1
-    num_train_epochs = 10
-    num_update_steps_per_epoch = math.ceil(len(data_list) / gradient_accumulation_steps)
-    
     transformer = SD3CNModel.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers", 
         subfolder="transformer", 
