@@ -106,6 +106,8 @@ def generate_image(transformer, vae, scheduler, text_embeddings, pooled_text_emb
             
             # Convert the numpy array to a PIL image
             pil_image = Image.fromarray((image[0] * 255).astype(np.uint8))
+            epoch = str(epoch).zfill(4)
+            index = str(index).zfill(4)
             pil_image.save(f"gen_images/{epoch}_{index}.png")
         
         # Predict the noise residual
@@ -162,7 +164,6 @@ def train():
     )
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
     
-    
     # Disable gradient computation for VAE and text embedders
     for param in vae.parameters():
         param.requires_grad = False
@@ -170,7 +171,6 @@ def train():
     control_next = ControlNeXtModel(upscale_dim=1536).to(device)
     
     # Optimizer creation
-    # params_to_optimize = control_next.parameters()
     params_to_optimize = list(transformer.parameters()) + list(control_next.parameters())
 
     optimizer = torch.optim.AdamW(
@@ -231,14 +231,6 @@ def train():
             res = control_next(hint_values, timesteps)
             control_out = res['output']
            
-            # print(noisy_model_input.device) 
-            # print(timesteps.device)
-            # print(prompt_embeds.device)
-            # print(pooled_prompt_embeds.device)
-            # print(control_out.device)
-
-            # import pdb; pdb.set_trace()
-
             # Predict the noise residual
             model_pred = transformer(
                 hidden_states=noisy_model_input,
@@ -258,10 +250,6 @@ def train():
             # and instead post-weight the loss
             weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
 
-            # flow matching loss
-            # if args.precondition_outputs:
-            #     target = model_input
-            # else:
             target = noise - model_input
 
             # Compute regular loss.
