@@ -108,6 +108,8 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
 
         self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
+        self.control_projection = nn.Linear(self.inner_dim, self.inner_dim)
+
 
         self.gradient_checkpointing = False
 
@@ -198,7 +200,9 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
             if index_block == 0 and controlnet_hidden_states is not None and block.context_pre_only is False:
                 # interval_control = len(self.transformer_blocks) // len(block_controlnet_hidden_states)
                 # hidden_states = hidden_states + block_controlnet_hidden_states[index_block // interval_control]
-                hidden_states = hidden_states + controlnet_hidden_states
+                projected_control = self.control_projection(controlnet_hidden_states)
+                hidden_states = hidden_states + projected_control
+                # hidden_states = hidden_states + controlnet_hidden_states
         # raise NotImplementedError("controlnet_hidden_states not implemented")
 
         hidden_states = self.norm_out(hidden_states, temb)
