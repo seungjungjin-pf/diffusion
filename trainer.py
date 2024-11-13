@@ -3,6 +3,7 @@ import math
 import torch
 from PIL import Image
 import numpy as np
+import os
 
 
 from matplotlib import pyplot as plt
@@ -15,13 +16,27 @@ from sd3 import SD3CNModel, get_sigmas
 from diffusers.optimization import get_scheduler
 
 from torch.utils.tensorboard import SummaryWriter
-import torchvision.utils as vutils
 
-from train_utils import retrieve_timesteps, generate_image
+from train_utils import generate_image
+from sd3_pipeline import SD3CNPipeline
 
         
+def train(base_log_dir="logs/sd3_training", run_type=None, index_block_location=0, gen_image_every=100, num_train_epochs=6000):
+    # Increment run number until a new directory is found
+    run_number = 0
+    run_dir = f"{run_number}"
+    if run_type is not None:
+        run_dir = f"{run_type}_{run_dir}"
+    while os.path.exists(os.path.join(base_log_dir, run_dir)):
+        run_number += 1
+        run_dir = f"{run_number}"
+        if run_type is not None:
+            run_dir = f"{run_type}_{run_dir}"
 
-def train():
+    log_dir = os.path.join(base_log_dir, run_dir)
+    print("Logging to:", log_dir)
+    writer = SummaryWriter(log_dir=log_dir)
+    
     weight_dtype = torch.float32
     logit_mean = 0.0
     logit_std = 1.0
@@ -34,8 +49,6 @@ def train():
     max_train_steps = 1000
     lr_num_cycles = 1
     lr_power = 1.0
-    
-    gen_scheduler = FlowMatchEulerDiscreteScheduler()
     
     learning_rate = 1e-4
     adam_beta1 = 0.9
@@ -63,6 +76,8 @@ def train():
     )
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
     
+    pipe = SD3CNPipeline(transformer, noise_scheduler, vae, device)
+    
     # Disable gradient computation for VAE and text embedders
     for param in vae.parameters():
         param.requires_grad = False
@@ -89,10 +104,7 @@ def train():
         power=lr_power,
     ) 
 
-    first_epoch = 0
-    num_train_epochs = 10000
-    loss_list = []
-    for epoch in range(first_epoch, num_train_epochs):
+    for epoch in range(num_train_epochs):
         for step, data in enumerate(data_list):
             # Convert images to latent space
             pixel_values = data['img']
@@ -126,9 +138,8 @@ def train():
             pooled_prompt_embeds = data["pooled_prompt_embeds"].to(device)
 
             # controlnet(s) inference
-
-            res = control_next(hint_values, timesteps)
-            control_out = res['output']
+            # use_controlnext = np.random.rand() < 0.5
+            control_hidden_states = control_next(hint_values, timesteps)['output']
            
             # Predict the noise residual
             model_pred = transformer(
@@ -136,8 +147,9 @@ def train():
                 timestep=timesteps,
                 encoder_hidden_states=prompt_embeds,
                 pooled_projections=pooled_prompt_embeds,
-                controlnet_hidden_states=control_out,
+                control_hidden_states=control_hidden_states,
                 return_dict=False,
+                index_block_location=index_block_location
             )[0]
 
             # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
@@ -157,13 +169,15 @@ def train():
                 1,
             )
             loss = loss.mean()
-            loss_list.append(loss.item())
+            writer.add_scalar('Loss', loss.item(), epoch)
             lr_scheduler.step()
             optimizer.zero_grad()
            
-        if epoch % 10 == 0:
-            print(np.mean(loss_list[10:]))
-            generate_image(transformer, vae, gen_scheduler, prompt_embeds, pooled_prompt_embeds, epoch, device)
+    if epoch % gen_image_every == 0 and epoch != 0:
+        img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_hidden_states, index_block_location)
+        writer.add_image('Image', img, epoch)
 
 if __name__ == '__main__':
-    train()
+    for i in range(24):
+        print("Current block location:", i)
+        train(base_log_dir='logs/sd3-img-gen-fixed', run_type=f"emb_{i}", index_block_location=i, gen_image_every=100, num_train_epochs=2000)

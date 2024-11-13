@@ -1,8 +1,10 @@
 import torch
 import numpy as np
 from PIL import Image
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 import inspect
+from diffusers import FlowMatchEulerDiscreteScheduler
+import torch.nn.functional as F
 
 
 def retrieve_timesteps(
@@ -64,43 +66,34 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-def generate_image(transformer, vae, scheduler, text_embeddings, pooled_text_embeddings, epoch, device, batch_size=1, num_inference_steps=1000):
-    num_channels_latents = transformer.config.in_channels
-    height, width = 64, 64  # Latent space dimensions (depends on your model)
+def generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_hidden_states, index_block_location):
+    res = pipe(prompt_embeds=prompt_embeds,
+               pooled_prompt_embeds=pooled_prompt_embeds,
+               control_hidden_states=control_hidden_states,
+               index_block_location=index_block_location,
+               guidance_scale=0.5)
+    image = res.images[0]
     
-    # Generate random latent noise
-    latents = torch.randn((batch_size, num_channels_latents, height, width))
-    latents = latents.to(transformer.device)
+    # Display the final grid image
+    return torch.tensor(np.asarray(image)).permute(2,0,1)
+
+
+def cross_norm1(x_m, x_c, scale=0.1, control_scale=0.2):
+    """Implementation from ControlNeXt github"""
+    mean_latents, std_latents = torch.mean(x_m, dim=(1, 2, 3), keepdim=True), torch.std(x_m, dim=(1, 2, 3), keepdim=True)
+    mean_control, std_control = torch.mean(x_c, dim=(1, 2, 3), keepdim=True), torch.std(x_c, dim=(1, 2, 3), keepdim=True)
     
-    # Set number of inference steps
-    timesteps, num_inference_steps = retrieve_timesteps(scheduler, num_inference_steps=num_inference_steps)
-    timesteps = timesteps.to(device)
+    conditional_controls = (x_c - mean_control) * (std_latents / (std_control + 1e-5)) + mean_latents
+    conditional_controls = F.adaptive_avg_pool2d(conditional_controls, x_m.shape[-2:])
+
+    return x_m + conditional_controls * scale * control_scale
+
+def cross_norm2(x_m, x_c, scale=0.1, control_scale=0.2):
+    """Implementation from paper"""
+    mean_latents, std_latents = torch.mean(x_m, dim=(1, 2, 3), keepdim=True), torch.std(x_m, dim=(1, 2, 3), keepdim=True)
+    mean_control, std_control = torch.mean(x_c, dim=(1, 2, 3), keepdim=True), torch.std(x_c, dim=(1, 2, 3), keepdim=True)
     
-    print("Generating image..")
-    
-    # Iteratively denoise latents
-    for index, t in enumerate(timesteps):
-        
-        if (index + 1) % (num_inference_steps / 10) == 0:
-            print(t)
-            # Decode latents to an image
-            with torch.no_grad():
-                # latents = 1 / 0.18215 * latents
-                image = vae.decode(latents).sample
-            
-            # Post-process image
-            image = (image / 2 + 0.5).clamp(0, 1)
-            image = image.cpu().permute(0, 2, 3, 1).numpy()
-            
-            # Convert the numpy array to a PIL image
-            pil_image = Image.fromarray((image[0] * 255).astype(np.uint8))
-            epoch = str(epoch+1).zfill(4)
-            index = str(index+1).zfill(4)
-            pil_image.save(f"gen_images/{epoch}_{index}.png")
-        
-        # Predict the noise residual
-        with torch.no_grad():
-            noise_pred = transformer(latents, timestep=t.view(-1), encoder_hidden_states=text_embeddings, pooled_projections=pooled_text_embeddings).sample
-    
-        # Compute the previous noisy sample
-        latents = scheduler.step(noise_pred, t.view(-1), latents).prev_sample 
+    conditional_controls = (x_c - mean_control) / torch.sqrt(torch.pow(std_control, 2) + 1e-5)
+    conditional_controls = F.adaptive_avg_pool2d(conditional_controls, x_m.shape[-2:])
+
+    return x_m + conditional_controls * scale

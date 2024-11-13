@@ -108,10 +108,24 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
 
         self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
-        self.control_projection = nn.Linear(self.inner_dim, self.inner_dim)
 
 
         self.gradient_checkpointing = False
+        
+    @classmethod
+    def from_pretrained(cls, model_path, **kwargs):
+        model = super().from_pretrained(model_path, **kwargs)
+        
+        # Initialize any custom weights here if they’re missing
+        if not hasattr(model, 'control_projection'):
+            model.control_projection = nn.Sequential(
+                nn.Linear(model.inner_dim*2, model.inner_dim),
+                nn.ReLU(),
+                nn.Linear(model.inner_dim, model.inner_dim),
+                nn.LayerNorm(model.inner_dim)  # Apply LayerNorm after transformations
+            )
+        return model
+
 
 
     def forward(
@@ -120,9 +134,10 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
         encoder_hidden_states: torch.FloatTensor = None,
         pooled_projections: torch.FloatTensor = None,
         timestep: torch.LongTensor = None,
-        controlnet_hidden_states: List = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
+        control_hidden_states: torch.tensor = None,
+        index_block_location: int = 0,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
         The [`SD3Transformer2DModel`] forward method.
@@ -197,13 +212,11 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
                     hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
                 )
             # # controlnet residual
-            if index_block == 0 and controlnet_hidden_states is not None and block.context_pre_only is False:
-                # interval_control = len(self.transformer_blocks) // len(block_controlnet_hidden_states)
-                # hidden_states = hidden_states + block_controlnet_hidden_states[index_block // interval_control]
-                projected_control = self.control_projection(controlnet_hidden_states)
+            if index_block == index_block_location and control_hidden_states is not None and block.context_pre_only is False:
+                control_time_embed = temb.unsqueeze(1).expand(-1, control_hidden_states.size(1), -1)  # Shape [1, 1024, 1536]
+                control_input = torch.cat([control_hidden_states, control_time_embed], dim=-1)
+                projected_control = self.control_projection(control_input)
                 hidden_states = hidden_states + projected_control
-                # hidden_states = hidden_states + controlnet_hidden_states
-        # raise NotImplementedError("controlnet_hidden_states not implemented")
 
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
@@ -220,10 +233,6 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
         output = hidden_states.reshape(
             shape=(hidden_states.shape[0], self.out_channels, height * patch_size, width * patch_size)
         )
-
-        # if USE_PEFT_BACKEND:
-        #     # remove `lora_scale` from each PEFT layer
-        #     unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (output,)
