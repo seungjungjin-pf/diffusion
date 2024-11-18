@@ -66,11 +66,16 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-def generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_hidden_states, index_block_location):
-    res = pipe(prompt_embeds=prompt_embeds,
+def generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_hidden_states, index_block_location, height=512, width=512):
+    print("Generating image")
+    
+    res = pipe(prompt_embeds=prompt_embeds, 
                pooled_prompt_embeds=pooled_prompt_embeds,
-               control_hidden_states=control_hidden_states,
+            #    control_hidden_states=control_hidden_states,
+               control_hidden_states=None,
                index_block_location=index_block_location,
+               height=height,
+               width=width,
                guidance_scale=0.5)
     image = res.images[0]
     

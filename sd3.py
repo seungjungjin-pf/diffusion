@@ -119,7 +119,7 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
         # Initialize any custom weights here if they’re missing
         if not hasattr(model, 'control_projection'):
             model.control_projection = nn.Sequential(
-                nn.Linear(model.inner_dim*2, model.inner_dim),
+                nn.Linear(model.inner_dim, model.inner_dim),
                 nn.ReLU(),
                 nn.Linear(model.inner_dim, model.inner_dim),
                 nn.LayerNorm(model.inner_dim)  # Apply LayerNorm after transformations
@@ -138,6 +138,7 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
         return_dict: bool = True,
         control_hidden_states: torch.tensor = None,
         index_block_location: int = 0,
+        print_shapes: bool = False,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
         The [`SD3Transformer2DModel`] forward method.
@@ -165,21 +166,18 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
-        if joint_attention_kwargs is not None:
-            joint_attention_kwargs = joint_attention_kwargs.copy()
-            lora_scale = joint_attention_kwargs.pop("scale", 1.0)
-        else:
-            lora_scale = 1.0
 
-        # if USE_PEFT_BACKEND:
-        #     # weight the lora layers by setting `lora_scale` for each PEFT layer
-        #     scale_lora_layers(self, lora_scale)
-        # else:
-        #     if joint_attention_kwargs is not None and joint_attention_kwargs.get("scale", None) is not None:
-        #         logger.warning(
-        #             "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
-        #         )
-
+        if print_shapes:
+            print("####Inside forward####")
+            print(f"Hidden states (latent) shape: {hidden_states.shape}")
+            print(f"Encoder hidden states shape: {encoder_hidden_states.shape}")
+            print(f"Pooled projections shape: {pooled_projections.shape}")
+            print(f"Timestep shape: {timestep.shape}")
+            if control_hidden_states is not None:
+                print(f"Control hidden states shape: {control_hidden_states.shape}")
+            print(f"Index block location: {index_block_location}")
+        
+        
         height, width = hidden_states.shape[-2:]
 
         hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
@@ -211,11 +209,13 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
                 encoder_hidden_states, hidden_states = block(
                     hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
                 )
+            if print_shapes and index_block == 0:
+                print(f"Hidden states (latent) shape after block 0: {hidden_states.shape}")
+                print(f"Encoder hidden states shape after block 0: {encoder_hidden_states.shape}")
             # # controlnet residual
             if index_block == index_block_location and control_hidden_states is not None and block.context_pre_only is False:
-                control_time_embed = temb.unsqueeze(1).expand(-1, control_hidden_states.size(1), -1)  # Shape [1, 1024, 1536]
-                control_input = torch.cat([control_hidden_states, control_time_embed], dim=-1)
-                projected_control = self.control_projection(control_input)
+                projected_control = self.control_projection(control_hidden_states)
+                
                 hidden_states = hidden_states + projected_control
 
         hidden_states = self.norm_out(hidden_states, temb)

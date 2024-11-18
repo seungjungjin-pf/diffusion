@@ -22,13 +22,14 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         groups = [4, 8],
         controlnext_scale=1.,
         upscale_dim = None,
+        embedding_input_dim = 16,
     ):
         super().__init__()
 
         self.time_proj = Timesteps(128, True, downscale_freq_shift=0)
         self.time_embedding = TimestepEmbedding(128, time_embed_dim)
         self.embedding = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(embedding_input_dim, 64, kernel_size=3, stride=2, padding=1),
             nn.GroupNorm(2, 64),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
@@ -92,7 +93,7 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         self.upscale_layer = None
         self.upscale_dim = upscale_dim
         if upscale_dim is not None:
-            self.upscale_layer = nn.Conv2d(in_channels=320, out_channels=1024, kernel_size=3, padding=1)
+            self.upscale_layer = nn.Conv2d(in_channels=320, out_channels=4096, kernel_size=3, padding=1)
 
     def forward(
         self,

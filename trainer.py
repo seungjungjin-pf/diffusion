@@ -1,9 +1,7 @@
 import copy
-import math
 import torch
-from PIL import Image
-import numpy as np
 import os
+import torchvision
 
 
 from matplotlib import pyplot as plt
@@ -19,9 +17,11 @@ from torch.utils.tensorboard import SummaryWriter
 
 from train_utils import generate_image
 from sd3_pipeline import SD3CNPipeline
+from tqdm import tqdm
 
         
-def train(base_log_dir="logs/sd3_training", run_type=None, index_block_location=0, gen_image_every=100, num_train_epochs=6000):
+def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False,
+          index_block_location=0, gen_image_every=100, num_train_epochs=6000, device='cuda:1', height=1024, width=1024):
     # Increment run number until a new directory is found
     run_number = 0
     run_dir = f"{run_number}"
@@ -42,7 +42,6 @@ def train(base_log_dir="logs/sd3_training", run_type=None, index_block_location=
     logit_std = 1.0
     mode_scale = 1.29
     weighting_scheme = "logit_normal"
-    device = 'cuda:0'
   
     scheduler_type = "constant"
     lr_warmup_steps = 500
@@ -82,10 +81,17 @@ def train(base_log_dir="logs/sd3_training", run_type=None, index_block_location=
     for param in vae.parameters():
         param.requires_grad = False
 
-    control_next = ControlNeXtModel(upscale_dim=1536).to(device)
+    
+    resize = torchvision.transforms.Resize((1024,1024))
+    
+    control_next = None
     
     # Optimizer creation
-    params_to_optimize = list(transformer.parameters()) + list(control_next.parameters())
+    params_to_optimize = list(transformer.parameters())
+    if use_controlnext:
+        control_next = ControlNeXtModel(upscale_dim=1536).to(device)
+        params_to_optimize = list(transformer.parameters()) + list(control_next.parameters())
+    
 
     optimizer = torch.optim.AdamW(
         params_to_optimize,
@@ -104,11 +110,13 @@ def train(base_log_dir="logs/sd3_training", run_type=None, index_block_location=
         power=lr_power,
     ) 
 
-    for epoch in range(num_train_epochs):
+    for epoch in tqdm(range(num_train_epochs)):
         for step, data in enumerate(data_list):
             # Convert images to latent space
             pixel_values = data['img']
             hint_values = data['hint']
+            pixel_values = resize(pixel_values).to(device)
+            hint_values = resize(hint_values).to(device)
             model_input = vae.encode(pixel_values).latent_dist.sample()
             model_input = (model_input - vae.config.shift_factor) * vae.config.scaling_factor
             model_input = model_input.to(dtype=weight_dtype)
@@ -139,7 +147,9 @@ def train(base_log_dir="logs/sd3_training", run_type=None, index_block_location=
 
             # controlnet(s) inference
             # use_controlnext = np.random.rand() < 0.5
-            control_hidden_states = control_next(hint_values, timesteps)['output']
+            control_hidden_states = None
+            if control_next is not None:
+                control_hidden_states = control_next(hint_values, timesteps)['output']
            
             # Predict the noise residual
             model_pred = transformer(
@@ -149,8 +159,20 @@ def train(base_log_dir="logs/sd3_training", run_type=None, index_block_location=
                 pooled_projections=pooled_prompt_embeds,
                 control_hidden_states=control_hidden_states,
                 return_dict=False,
-                index_block_location=index_block_location
+                index_block_location=index_block_location,
+                print_shapes=epoch == 0
             )[0]
+            
+            if epoch == 0:
+                print("******************Training shapes******************")
+                print(f"Model input shape: {model_input.shape}")
+                print(f"Noisy model input shape: {noisy_model_input.shape}")
+                print(f"Model pred shape: {model_pred.shape}")
+                print(f"Prompt embeds shape: {prompt_embeds.shape}")
+                print(f"Pooled prompt embeds shape: {pooled_prompt_embeds.shape}")
+                if control_hidden_states is not None:
+                    print(f"Control hidden states shape: {control_hidden_states.shape}")
+                
 
             # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
             # Preconditioning of the model outputs.
@@ -173,11 +195,15 @@ def train(base_log_dir="logs/sd3_training", run_type=None, index_block_location=
             lr_scheduler.step()
             optimizer.zero_grad()
            
-    if epoch % gen_image_every == 0 and epoch != 0:
-        img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_hidden_states, index_block_location)
-        writer.add_image('Image', img, epoch)
+        if epoch % gen_image_every == 0 and epoch != 0:
+            img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_hidden_states, index_block_location, height=height, width=width)
+            writer.add_image('Image', img, epoch)
 
 if __name__ == '__main__':
+    use_controlnext = False
     for i in range(24):
+        if not use_controlnext and i > 0:
+            break
         print("Current block location:", i)
-        train(base_log_dir='logs/sd3-img-gen-fixed', run_type=f"emb_{i}", index_block_location=i, gen_image_every=100, num_train_epochs=2000)
+        train(base_log_dir='logs/sd3-base', run_type=f"emb-full-{i}_{use_controlnext=}", index_block_location=i, 
+              use_controlnext=use_controlnext, gen_image_every=500, num_train_epochs=10000, height=1024, width=1024)

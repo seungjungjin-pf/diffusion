@@ -64,11 +64,11 @@ class SD3CNPipeline:
 
     def __init__(
         self,
-        # transformer: SD3Transformer2DModel,
         transformer: SD3CNModel,
         scheduler: FlowMatchEulerDiscreteScheduler,
         vae: AutoencoderKL,
         device: Union[str, torch.device],
+        use_vae_scale_factor: bool = True,
     ):
         super().__init__()
 
@@ -76,21 +76,21 @@ class SD3CNPipeline:
         self.transformer = transformer
         self.scheduler = scheduler
         self.device = device
-        
-        self.vae_scale_factor = (
-            2 ** (len(self.vae.config.block_out_channels) - 1) if hasattr(self, "vae") and self.vae is not None else 8
-        )
+       
+        self.vae_scale_factor = 1
+        if use_vae_scale_factor: 
+            self.vae_scale_factor = (
+                2 ** (len(self.vae.config.block_out_channels) - 1) if self.vae is not None else 8
+            )
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
-        self.tokenizer_max_length = (
-            self.tokenizer.model_max_length if hasattr(self, "tokenizer") and self.tokenizer is not None else 77
-        )
+        
         self.default_sample_size = (
             self.transformer.config.sample_size
-            if hasattr(self, "transformer") and self.transformer is not None
+            if self.transformer is not None
             else 128
         )
         self.patch_size = (
-            self.transformer.config.patch_size if hasattr(self, "transformer") and self.transformer is not None else 2
+            self.transformer.config.patch_size if self.transformer is not None else 2
         )
         
     def progress_bar(self, iterable=None, total=None):
@@ -128,6 +128,8 @@ class SD3CNPipeline:
             num_channels_latents,
             int(height) // self.vae_scale_factor,
             int(width) // self.vae_scale_factor,
+            # int(height),
+            # int(width),
         )
 
         if isinstance(generator, list) and len(generator) != batch_size:
@@ -307,6 +309,7 @@ class SD3CNPipeline:
 
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
+            index = 0
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
@@ -323,9 +326,12 @@ class SD3CNPipeline:
                     pooled_projections=pooled_prompt_embeds,
                     joint_attention_kwargs=self.joint_attention_kwargs,
                     return_dict=False,
-                    control_hidden_states=control_hidden_states,
+                    # control_hidden_states=control_hidden_states,
+                    control_hidden_states=None,
                     index_block_location=index_block_location,
+                    print_shapes=index == 0,
                 )[0]
+                index += 1
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
