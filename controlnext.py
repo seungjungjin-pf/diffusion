@@ -94,6 +94,7 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         self.upscale_dim = upscale_dim
         if upscale_dim is not None:
             self.upscale_layer = nn.Conv2d(in_channels=320, out_channels=4096, kernel_size=3, padding=1)
+            # self.upscale_layer = nn.Conv2d(in_channels=320, out_channels=1024, kernel_size=3, padding=1)
 
     def forward(
         self,

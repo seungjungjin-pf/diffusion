@@ -326,8 +326,7 @@ class SD3CNPipeline:
                     pooled_projections=pooled_prompt_embeds,
                     joint_attention_kwargs=self.joint_attention_kwargs,
                     return_dict=False,
-                    # control_hidden_states=control_hidden_states,
-                    control_hidden_states=None,
+                    control_hidden_states=control_hidden_states,
                     index_block_location=index_block_location,
                     print_shapes=index == 0,
                 )[0]
