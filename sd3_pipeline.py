@@ -192,10 +192,11 @@ class SD3CNPipeline:
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 256,
-        control_hidden_states: Optional[torch.Tensor] = None,
         index_block_location: Optional[int] = None,
         vae: Optional[AutoencoderKL] = None, # provide updated model if neeeded
         transformer: Optional[SD3CNModel] = None, # provied updated model if needed
+        control_next_model: Optional[torch.nn.Module] = None,
+        control_input: Optional[torch.Tensor] = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -318,6 +319,9 @@ class SD3CNPipeline:
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
+                control_hidden_states = None
+                if control_next_model is not None:
+                    control_hidden_states = control_next_model(control_input, timestep)['output']
 
                 noise_pred = self.transformer(
                     hidden_states=latent_model_input,
@@ -328,7 +332,7 @@ class SD3CNPipeline:
                     return_dict=False,
                     control_hidden_states=control_hidden_states,
                     index_block_location=index_block_location,
-                    print_shapes=index == 0,
+                    print_shapes=False,
                 )[0]
                 index += 1
 

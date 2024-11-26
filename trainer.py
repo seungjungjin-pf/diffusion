@@ -1,6 +1,7 @@
 import copy
-import torch
+import numpy as np
 import os
+import torch
 import torchvision
 
 from argparse import ArgumentParser
@@ -23,7 +24,8 @@ from tqdm import tqdm
 
         
 def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False, resize=False,
-          index_block_location=0, gen_image_every=100, num_train_epochs=6000, device='cuda:1', height=1024, width=1024):
+          index_block_location=0, gen_image_every=10, num_train_epochs=10, device='cuda:1', height=1024, width=1024,
+          lr_scheduler_type='constant', dataset_name='prompt_tensors_list.pt', print_shapes=False):
     # Increment run number until a new directory is found
     run_number = 0
     run_dir = f"{run_number}"
@@ -45,10 +47,8 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
     mode_scale = 1.29
     weighting_scheme = "logit_normal"
   
-    scheduler_type = "constant"
     lr_warmup_steps = 500
-    max_train_steps = 1000
-    lr_num_cycles = 1
+    lr_num_cycles = 2
     lr_power = 1.0
     
     learning_rate = 1e-4
@@ -57,8 +57,8 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
     adam_weight_decay = 1e-4
     adam_epsilon = 1e-8
     
-    data_list = get_precomputed_tensors(device=device)
-    data_list = [data_list[0]]
+    data_list = get_precomputed_tensors(device='cpu', filename=dataset_name)
+    # data_list = [data_list[0]]
             
     transformer = SD3CNModel.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers", 
@@ -102,121 +102,168 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
         eps=adam_epsilon,
     )
 
+    train_data_list = data_list[:-2]
+    test_data_list = data_list[-2:]
+    for data in test_data_list:
+        print(data['prompt'])
+        
     lr_scheduler = get_scheduler(
-        scheduler_type,
+        lr_scheduler_type,
         optimizer=optimizer,
         num_warmup_steps=lr_warmup_steps,
-        num_training_steps=max_train_steps,
-        num_cycles=lr_num_cycles,
+        num_training_steps=len(train_data_list)*num_train_epochs,
+        num_cycles=num_train_epochs,
         power=lr_power,
     ) 
+   
+    global_step = 0 
+    for epoch in range(num_train_epochs):
+        with tqdm(train_data_list, total=len(train_data_list), desc=f"Epoch {epoch}") as pbar:
+            for step, data in enumerate(pbar):
+                if global_step % gen_image_every == 0:
+                    transformer.eval()
+                    for _i, data in enumerate(test_data_list):
+                        for key, value in data.items():
+                            if isinstance(value, torch.Tensor):
+                                data[key] = data[key].to(device)
+                        prompt_embeds = data["prompt_embeds"]
+                        pooled_prompt_embeds = data["pooled_prompt_embeds"]
+                        prompt = data["prompt"]
+                        if control_next is not None and global_step != 0:
+                            control_next.eval()
+                            hint_img = data["hint"]
+                            if resize:
+                                hint_img = resize(hint_img).to(device)
+                            control_input = vae.encode(hint_img).latent_dist.sample()
+                            control_input = (control_input - vae.config.shift_factor) * vae.config.scaling_factor
+                            control_input = control_input.to(dtype=weight_dtype)
+                            img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_next, control_input, index_block_location, height=height, width=width)
+                        else:
+                            img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, None, None, index_block_location, height=height, width=width)
+                        
+                        writer.add_image(f'Image_{_i}_{prompt}', img, global_step)
+                        
+                        
+                transformer.train()
+                if control_next is not None:
+                    control_next.train()
+                for key, value in data.items():
+                    if isinstance(value, torch.Tensor):
+                        data[key] = data[key].to(device)
+                # Convert images to latent space
+                pixel_values = data['img']
+                hint_values = data['hint']
+                if resize:
+                    pixel_values = resize(pixel_values).to(device)
+                    hint_values = resize(hint_values).to(device)
+                model_input = vae.encode(pixel_values).latent_dist.sample()
+                model_input = (model_input - vae.config.shift_factor) * vae.config.scaling_factor
+                model_input = model_input.to(dtype=weight_dtype)
+                
+                control_input = vae.encode(hint_values).latent_dist.sample()
+                control_input = (control_input - vae.config.shift_factor) * vae.config.scaling_factor
+                control_input = control_input.to(dtype=weight_dtype)
 
-    for epoch in tqdm(range(num_train_epochs)):
-        transformer.train()
-        if control_next is not None:
-            control_next.train()
-        for step, data in enumerate(data_list):
-            # Convert images to latent space
-            pixel_values = data['img']
-            hint_values = data['hint']
-            if resize:
-                pixel_values = resize(pixel_values).to(device)
-                hint_values = resize(hint_values).to(device)
-            model_input = vae.encode(pixel_values).latent_dist.sample()
-            model_input = (model_input - vae.config.shift_factor) * vae.config.scaling_factor
-            model_input = model_input.to(dtype=weight_dtype)
-            
-            control_input = vae.encode(hint_values).latent_dist.sample()
-            control_input = (control_input - vae.config.shift_factor) * vae.config.scaling_factor
-            control_input = control_input.to(dtype=weight_dtype)
+                # Sample noise that we'll add to the latents
+                noise = torch.randn_like(model_input)
+                bsz = model_input.shape[0]
+                # Sample a random timestep for each image
+                # for weighting schemes where we sample timesteps non-uniformly
+                u = compute_density_for_timestep_sampling(
+                    weighting_scheme=weighting_scheme,
+                    batch_size=bsz,
+                    logit_mean=logit_mean,
+                    logit_std=logit_std,
+                    mode_scale=mode_scale,
+                )
+                indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
+                timesteps = noise_scheduler_copy.timesteps[indices].to(device=model_input.device)
 
-            # Sample noise that we'll add to the latents
-            noise = torch.randn_like(model_input)
-            bsz = model_input.shape[0]
-            # Sample a random timestep for each image
-            # for weighting schemes where we sample timesteps non-uniformly
-            u = compute_density_for_timestep_sampling(
-                weighting_scheme=weighting_scheme,
-                batch_size=bsz,
-                logit_mean=logit_mean,
-                logit_std=logit_std,
-                mode_scale=mode_scale,
-            )
-            indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-            timesteps = noise_scheduler_copy.timesteps[indices].to(device=model_input.device)
+                # Add noise according to flow matching.
+                # zt = (1 - texp) * x + texp * z1
+                sigmas = get_sigmas(timesteps, noise_scheduler_copy, n_dim=model_input.ndim, dtype=model_input.dtype, device=model_input.device)
+                noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
 
-            # Add noise according to flow matching.
-            # zt = (1 - texp) * x + texp * z1
-            sigmas = get_sigmas(timesteps, noise_scheduler_copy, n_dim=model_input.ndim, dtype=model_input.dtype, device=model_input.device)
-            noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
-
-            # Get the text embedding for conditioning
-            prompt_embeds = data["prompt_embeds"].to(device)
-            pooled_prompt_embeds = data["pooled_prompt_embeds"].to(device)
-
-            # controlnet(s) inference
-            # use_controlnext = np.random.rand() < 0.5
-            control_hidden_states = None
-            if control_next is not None:
-                control_hidden_states = control_next(control_input, timesteps)['output']
-           
-            # Predict the noise residual
-            model_pred = transformer(
-                hidden_states=noisy_model_input,
-                timestep=timesteps,
-                encoder_hidden_states=prompt_embeds,
-                pooled_projections=pooled_prompt_embeds,
-                control_hidden_states=control_hidden_states,
-                return_dict=False,
-                index_block_location=index_block_location,
-                print_shapes=epoch == 0
-            )[0]
-            
-            if epoch == 0:
-                print("******************Training shapes******************")
-                print(f"Model input shape: {model_input.shape}")
-                print(f"Noisy model input shape: {noisy_model_input.shape}")
-                print(f"Model pred shape: {model_pred.shape}")
-                print(f"Prompt embeds shape: {prompt_embeds.shape}")
-                print(f"Pooled prompt embeds shape: {pooled_prompt_embeds.shape}")
-                if control_hidden_states is not None:
-                    print(f"Control hidden states shape: {control_hidden_states.shape}")
+                # Get the text embedding for conditioning
+                prompt_embeds = data["prompt_embeds"].to(device)
+                pooled_prompt_embeds = data["pooled_prompt_embeds"].to(device)
                 
 
-            # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
-            # Preconditioning of the model outputs.
-            # if args.precondition_outputs:
-            #     model_pred = model_pred * (-sigmas) + noisy_model_input
+                # controlnet(s) inference
+                use_controlnext = np.random.rand() < 0.5
+                control_hidden_states = None
+                if control_next is not None and use_controlnext:
+                    control_hidden_states = control_next(control_input, timesteps)['output']
+            
+                # Predict the noise residual
+                model_pred = transformer(
+                    hidden_states=noisy_model_input,
+                    timestep=timesteps,
+                    encoder_hidden_states=prompt_embeds,
+                    pooled_projections=pooled_prompt_embeds,
+                    control_hidden_states=control_hidden_states,
+                    return_dict=False,
+                    index_block_location=index_block_location,
+                    print_shapes=print_shapes,
+                )[0]
+                
+                if global_step == 0 and print_shapes:
+                    print("******************Training shapes******************")
+                    print(f"Model input shape: {model_input.shape}")
+                    print(f"Noisy model input shape: {noisy_model_input.shape}")
+                    print(f"Model pred shape: {model_pred.shape}")
+                    print(f"Prompt embeds shape: {prompt_embeds.shape}")
+                    print(f"Pooled prompt embeds shape: {pooled_prompt_embeds.shape}")
+                    if control_hidden_states is not None:
+                        print(f"Control hidden states shape: {control_hidden_states.shape}")
+                    
 
-            # these weighting schemes use a uniform timestep sampling
-            # and instead post-weight the loss
-            weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
+                # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
+                # Preconditioning of the model outputs.
+                # if args.precondition_outputs:
+                #     model_pred = model_pred * (-sigmas) + noisy_model_input
 
-            target = noise - model_input
+                # these weighting schemes use a uniform timestep sampling
+                # and instead post-weight the loss
+                weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
 
-            # Compute regular loss.
-            loss = torch.mean(
-                (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                1,
-            )
-            loss = loss.mean()
-            writer.add_scalar('Loss', loss.item(), epoch)
-            lr_scheduler.step()
-            optimizer.zero_grad()
-           
-        if epoch % gen_image_every == 0 and epoch != 0:
-            img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_hidden_states, index_block_location, height=height, width=width)
-            writer.add_image('Image', img, epoch)
+                target = noise - model_input
+
+                # Compute regular loss.
+                loss = torch.mean(
+                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+                    1,
+                )
+                loss = loss.mean()
+                optimizer.zero_grad()
+                
+                loss.backward()
+                
+                optimizer.step()
+                lr_scheduler.step()
+                
+                writer.add_scalar('Loss', loss.item(), global_step)
+                writer.add_scalar('lr', lr_scheduler.get_lr()[0], global_step)
+                
+                global_step += 1
+                pbar.set_postfix(step=global_step, loss=loss.item())
+        
+
 
 if __name__ == '__main__':
     args = ArgumentParser()
     args.add_argument("--use-controlnext", action="store_true")
+    args.add_argument("--print-shapes", action="store_true")
     args.add_argument("--gen-image-every", type=int, default=100)
     args.add_argument("--num-train-epochs", type=int, default=7000)
+    args.add_argument("--lr-scheduler-type", type=str, default='constant')
+    args.add_argument("--dataset-name", type=str, default='prompt_tensors_list.pt')
     args = args.parse_args()
     
     use_controlnext = args.use_controlnext
     index = 0
-    train(base_log_dir='logs/sd3-base', run_type=f"emb-vae-input-{index}_{use_controlnext=}", index_block_location=index, 
-          resize=True,
-          use_controlnext=use_controlnext, gen_image_every=args.gen_image_every, num_train_epochs=args.num_train_epochs, height=1024, width=1024)
+    train(base_log_dir='logs/sd3-large', run_type=f"use-control", index_block_location=index, 
+          resize=True, lr_scheduler_type=args.lr_scheduler_type, dataset_name=args.dataset_name,
+          use_controlnext=use_controlnext, gen_image_every=args.gen_image_every, num_train_epochs=args.num_train_epochs, 
+          print_shapes=args.print_shapes,
+          height=1024, width=1024)

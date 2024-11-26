@@ -13,6 +13,7 @@ from diffusers.models.normalization import AdaLayerNormContinuous
 from diffusers.loaders import FromOriginalModelMixin, PeftAdapterMixin
 from diffusers.models.modeling_utils import ModelMixin
 from modeling_output import Transformer2DModelOutput
+from train_utils import cross_norm1
 
 
 logger = logging.getLogger("diffusers").setLevel(logging.ERROR)
@@ -112,22 +113,6 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
 
         self.gradient_checkpointing = False
         
-    @classmethod
-    def from_pretrained(cls, model_path, **kwargs):
-        model = super().from_pretrained(model_path, **kwargs)
-        
-        # Initialize any custom weights here if they’re missing
-        if not hasattr(model, 'control_projection'):
-            model.control_projection = nn.Sequential(
-                nn.Linear(model.inner_dim, model.inner_dim),
-                nn.ReLU(),
-                nn.Linear(model.inner_dim, model.inner_dim),
-                nn.LayerNorm(model.inner_dim)  # Apply LayerNorm after transformations
-            )
-        return model
-
-
-
     def forward(
         self,
         hidden_states: torch.FloatTensor,
@@ -214,9 +199,8 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
                 print(f"Encoder hidden states shape after block 0: {encoder_hidden_states.shape}")
             # # controlnet residual
             if index_block == index_block_location and control_hidden_states is not None and block.context_pre_only is False:
-                projected_control = self.control_projection(control_hidden_states)
-                
-                hidden_states = hidden_states + projected_control
+                norm = cross_norm1(hidden_states, control_hidden_states, scale=0.1, control_scale=0.2)
+                hidden_states = hidden_states + norm
 
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)

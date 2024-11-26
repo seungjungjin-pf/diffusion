@@ -1,5 +1,6 @@
 import torch
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
+from tqdm import tqdm
 
 
 from datasets import FillDataset
@@ -143,23 +144,20 @@ def encode_prompt(
 
     return prompt_embeds, pooled_prompt_embeds
 
-def main():
+def main(num_data=500, device='cuda:2'):
     dataset = FillDataset()
-    prompt_list = [dataset[0]["txt"], dataset[1]["txt"]]
-    img_list = [dataset[0]["jpg"], dataset[1]["jpg"]]
-    hint_list = [dataset[0]["hint"], dataset[1]["hint"]]
     
     text_model1 = "openai/clip-vit-large-patch14"
     tokenizer1 = CLIPTokenizer.from_pretrained(text_model1)
-    text_encoder1 = CLIPTextModelWithProjection.from_pretrained(text_model1)
+    text_encoder1 = CLIPTextModelWithProjection.from_pretrained(text_model1).to(device)
 
     text_model2 = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k"
     tokenizer2 = CLIPTokenizer.from_pretrained(text_model2)
-    text_encoder2 = CLIPTextModelWithProjection.from_pretrained(text_model2)
+    text_encoder2 = CLIPTextModelWithProjection.from_pretrained(text_model2).to(device)
 
     text_model3 = "google/t5-v1_1-xxl"
     tokenizer3 = T5TokenizerFast.from_pretrained(text_model3)
-    text_encoder3 = T5EncoderModel.from_pretrained(text_model3)
+    text_encoder3 = T5EncoderModel.from_pretrained(text_model3).to(device)
     
     encoder_list = [text_encoder1, text_encoder2, text_encoder3]
     tokenizer_list = [tokenizer1, tokenizer2, tokenizer3]
@@ -167,27 +165,22 @@ def main():
     for encoder in encoder_list:
         for param in encoder.parameters():
             param.requires_grad = False
-            
-    
-    prompt_embeds1, pooled_prompt_embeds1 = encode_prompt(encoder_list, tokenizer_list, prompt_list[0], 77)
-    prompt_embeds2, pooled_prompt_embeds2 = encode_prompt(encoder_list, tokenizer_list, prompt_list[1], 77)
 
-    
-    tensor_list = [
-        {'prompt_embeds': prompt_embeds1, 
-        'pooled_prompt_embeds': pooled_prompt_embeds1,
-        'prompt': prompt_list[0], 
-        'img': img_list[0],
-        'hint': hint_list[0]
-        },
-        {'prompt_embeds': prompt_embeds2, 
-        'pooled_prompt_embeds': pooled_prompt_embeds2,
-        'prompt': prompt_list[1], 
-        'img': img_list[1],
-        'hint': hint_list[1]
+    tensor_list = []            
+    for i, data in enumerate(tqdm(dataset)):
+        if i == num_data:
+            break
+        prompt_embeds, pooled_prompt_embeds = encode_prompt(encoder_list, tokenizer_list, data['txt'], 77, device=device)
+        res = {
+            'prompt_embeds': prompt_embeds,
+            'pooled_prompt_embeds': pooled_prompt_embeds,
+            'prompt': data['txt'],
+            'img': data['jpg'],
+            'hint': data['hint']
         }
-    ]
-    torch.save(tensor_list, 'prompt_tensors_list.pt')
+        tensor_list.append(res)
+
+    torch.save(tensor_list, 'prompt_tensors_list_large.pt')
     
 def get_precomputed_tensors(device, filename='prompt_tensors_list.pt'):
     tensor_list = torch.load(filename)
@@ -195,11 +188,12 @@ def get_precomputed_tensors(device, filename='prompt_tensors_list.pt'):
         for key, value in data.items():
             if key != 'prompt' and not isinstance(value, torch.Tensor):
                 data[key] = torch.tensor(data[key]).to(device)
+            if isinstance(value, torch.Tensor):
+                data[key] = data[key].to(device)
             if key in ['img', 'hint']:
                 data[key] = data[key].permute(2, 0, 1).unsqueeze(dim=0)
     return tensor_list
-    
-    
+
 if __name__ == "__main__":
     main()
     

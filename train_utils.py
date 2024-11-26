@@ -66,27 +66,40 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-def generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_hidden_states, index_block_location, height=512, width=512):
-    print("Generating image")
+def generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_next_model, control_input, index_block_location, height=512, width=512, use_controlnext=True):
+    print("####Generating image")
     
-    res = pipe(prompt_embeds=prompt_embeds, 
-               pooled_prompt_embeds=pooled_prompt_embeds,
-            #    control_hidden_states=control_hidden_states,
-               control_hidden_states=None,
-               index_block_location=index_block_location,
-               height=height,
-               width=width,
-               guidance_scale=0.5)
+    if use_controlnext: 
+        res = pipe(prompt_embeds=prompt_embeds, 
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                control_next_model=control_next_model,
+                control_input=control_input,
+                index_block_location=index_block_location,
+                height=height,
+                width=width,
+                guidance_scale=0.5)
+    else:
+        res = pipe(prompt_embeds=prompt_embeds, 
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                control_next_model=None,
+                control_input=None,
+                index_block_location=index_block_location,
+                height=height,
+                width=width,
+                guidance_scale=0.5)
+        
     image = res.images[0]
+    print("####Done generating image")
     
     # Display the final grid image
     return torch.tensor(np.asarray(image)).permute(2,0,1)
 
 
-def cross_norm1(x_m, x_c, scale=0.1, control_scale=0.2):
+# def cross_norm1(x_m, x_c, scale=0.1, control_scale=0.2):
+def cross_norm1(x_m, x_c, scale=0.8, control_scale=0.8):
     """Implementation from ControlNeXt github"""
-    mean_latents, std_latents = torch.mean(x_m, dim=(1, 2, 3), keepdim=True), torch.std(x_m, dim=(1, 2, 3), keepdim=True)
-    mean_control, std_control = torch.mean(x_c, dim=(1, 2, 3), keepdim=True), torch.std(x_c, dim=(1, 2, 3), keepdim=True)
+    mean_latents, std_latents = torch.mean(x_m, dim=(1, 2), keepdim=True), torch.std(x_m, dim=(1, 2), keepdim=True)
+    mean_control, std_control = torch.mean(x_c, dim=(1, 2), keepdim=True), torch.std(x_c, dim=(1, 2), keepdim=True)
     
     conditional_controls = (x_c - mean_control) * (std_latents / (std_control + 1e-5)) + mean_latents
     conditional_controls = F.adaptive_avg_pool2d(conditional_controls, x_m.shape[-2:])
@@ -102,3 +115,24 @@ def cross_norm2(x_m, x_c, scale=0.1, control_scale=0.2):
     conditional_controls = F.adaptive_avg_pool2d(conditional_controls, x_m.shape[-2:])
 
     return x_m + conditional_controls * scale
+
+
+# def cross_norm1(x_m, x_c, scale=0.1, control_scale=0.2):
+#     """Implementation from ControlNeXt github"""
+#     mean_latents, std_latents = torch.mean(x_m, dim=(1, 2, 3), keepdim=True), torch.std(x_m, dim=(1, 2, 3), keepdim=True)
+#     mean_control, std_control = torch.mean(x_c, dim=(1, 2, 3), keepdim=True), torch.std(x_c, dim=(1, 2, 3), keepdim=True)
+    
+#     conditional_controls = (x_c - mean_control) * (std_latents / (std_control + 1e-5)) + mean_latents
+#     conditional_controls = F.adaptive_avg_pool2d(conditional_controls, x_m.shape[-2:])
+
+#     return x_m + conditional_controls * scale * control_scale
+
+# def cross_norm2(x_m, x_c, scale=0.1, control_scale=0.2):
+#     """Implementation from paper"""
+#     mean_latents, std_latents = torch.mean(x_m, dim=(1, 2, 3), keepdim=True), torch.std(x_m, dim=(1, 2, 3), keepdim=True)
+#     mean_control, std_control = torch.mean(x_c, dim=(1, 2, 3), keepdim=True), torch.std(x_c, dim=(1, 2, 3), keepdim=True)
+    
+#     conditional_controls = (x_c - mean_control) / torch.sqrt(torch.pow(std_control, 2) + 1e-5)
+#     conditional_controls = F.adaptive_avg_pool2d(conditional_controls, x_m.shape[-2:])
+
+#     return x_m + conditional_controls * scale
