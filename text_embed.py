@@ -166,6 +166,45 @@ def main(num_data=500, device='cuda:2'):
         for param in encoder.parameters():
             param.requires_grad = False
 
+    for i, data in enumerate(tqdm(dataset)):
+        if i <= 1000:
+            continue
+        if i > 5000:
+            break
+        prompt_embeds, pooled_prompt_embeds = encode_prompt(encoder_list, tokenizer_list, data['txt'], 77, device=device)
+        filename = data['target_filename'].split('.')[0]
+        filename = filename.split('/')[1]
+        filename = f'tensors/{filename}.pt'
+        res = {
+            'prompt_embeds': prompt_embeds,
+            'pooled_prompt_embeds': pooled_prompt_embeds,
+            'prompt': data['txt'],
+        }
+
+        torch.save(res, filename)
+    
+def main2(num_data=500, device='cuda:2'):
+    dataset = FillDataset()
+    
+    text_model1 = "openai/clip-vit-large-patch14"
+    tokenizer1 = CLIPTokenizer.from_pretrained(text_model1)
+    text_encoder1 = CLIPTextModelWithProjection.from_pretrained(text_model1).to(device)
+
+    text_model2 = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k"
+    tokenizer2 = CLIPTokenizer.from_pretrained(text_model2)
+    text_encoder2 = CLIPTextModelWithProjection.from_pretrained(text_model2).to(device)
+
+    text_model3 = "google/t5-v1_1-xxl"
+    tokenizer3 = T5TokenizerFast.from_pretrained(text_model3)
+    text_encoder3 = T5EncoderModel.from_pretrained(text_model3).to(device)
+    
+    encoder_list = [text_encoder1, text_encoder2, text_encoder3]
+    tokenizer_list = [tokenizer1, tokenizer2, tokenizer3]
+    
+    for encoder in encoder_list:
+        for param in encoder.parameters():
+            param.requires_grad = False
+
     tensor_list = []            
     for i, data in enumerate(tqdm(dataset)):
         if i == num_data:
