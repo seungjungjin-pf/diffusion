@@ -319,9 +319,7 @@ class SD3CNPipeline:
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
-                control_hidden_states = None
-                if control_next_model is not None:
-                    control_hidden_states = control_next_model(control_input, timestep)['output']
+                control_hidden_states = control_next_model(control_input, timestep)['output']
 
                 noise_pred = self.transformer(
                     hidden_states=latent_model_input,

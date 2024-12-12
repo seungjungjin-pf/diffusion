@@ -28,10 +28,119 @@ from tqdm import tqdm
 
 torch.manual_seed(21)
 torch.autograd.set_detect_anomaly(True)
+
+
+def log_test(test_loader, pipe, transformer, control_next, vae, writer, device, global_step, index_block_location, weight_dtype, height=1024, width=1024):
+    print("Evaluating test")
+    transformer.eval()
+    control_next.eval()
+    with torch.no_grad():
+        for _, test_data in enumerate(test_loader):
+            # batch_size = test_loader.batch_size
+            prompt = test_data["prompt"]
+            prompt_embeds = test_data["prompt_embeds"].to(device)
+            pooled_prompt_embeds = test_data["pooled_prompt_embeds"].to(device)
+            hint_img = test_data["hint"].to(device)
+
+            # Generate image with control
+            control_input = vae.encode(hint_img).latent_dist.sample()
+            control_input = (control_input - vae.config.shift_factor) * vae.config.scaling_factor
+            control_input = control_input.to(dtype=weight_dtype)
+            
+            prompt_embeds = torch.concat([prompt_embeds, prompt_embeds], dim=0).to(device)
+            pooled_prompt_embeds = torch.concat([pooled_prompt_embeds, pooled_prompt_embeds], dim=0).to(device)
+            hint_img = torch.concat([hint_img, hint_img], dim=0).to(device)
+            control_input = torch.concat([control_input, torch.zeros(control_input.size()).to(device)], dim=0)
+            
+            img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_next, control_input, index_block_location, height=height, width=width)
+            
+            # FIXME: Add according to batchsize 
+            writer.add_image(f'With_control_0_{prompt[0]}', img[0], global_step)
+            writer.add_image(f'With_control_1_{prompt[1]}', img[1], global_step)
+            writer.add_image(f'Without_control_0_{prompt[0]}', img[2], global_step)
+            writer.add_image(f'Without_control_1_{prompt[1]}', img[3], global_step)
+
+
+def log_validation(valid_loader, transformer, control_next, vae, noise_scheduler_copy, 
+                   time_sampling_params, device, writer, global_step, index_block_location, 
+                   weight_dtype, print_shapes=False,
+                   height=1024, width=1024):
+    print("Evaluating validation")
+    transformer.eval()
+    control_next.eval()
+    with torch.no_grad():
+        val_loss_list = []
+        for _i, valid_data in enumerate(valid_loader):
+            pixel_values = valid_data['img'].to(device)
+            hint_values = valid_data['hint'].to(device)
+            prompt_embeds = valid_data["prompt_embeds"].to(device)
+            pooled_prompt_embeds = valid_data["pooled_prompt_embeds"].to(device)
+            
+            model_input = vae.encode(pixel_values).latent_dist.sample()
+            model_input = (model_input - vae.config.shift_factor) * vae.config.scaling_factor
+            model_input = model_input.to(dtype=weight_dtype)
+            
+            control_input = vae.encode(hint_values).latent_dist.sample()
+            control_input = (control_input - vae.config.shift_factor) * vae.config.scaling_factor
+            control_input = control_input.to(dtype=weight_dtype)
+            
+
+            # Sample noise that we'll add to the latents
+            noise = torch.randn_like(model_input)
+            bsz = model_input.shape[0]
+            # Sample a random timestep for each image
+            # for weighting schemes where we sample timesteps non-uniformly
+            u = compute_density_for_timestep_sampling(
+                weighting_scheme=time_sampling_params["weighting_scheme"],
+                batch_size=bsz,
+                logit_mean=time_sampling_params["logit_mean"],
+                logit_std=time_sampling_params["logit_std"],
+                mode_scale=time_sampling_params["mode_scale"],
+            )
+            indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
+            timesteps = noise_scheduler_copy.timesteps[indices].to(device=model_input.device)
+            
+            # controlnet(s) inference
+            control_hidden_states = control_next(control_input, timesteps)['output']
+
+            # Add noise according to flow matching.
+            # zt = (1 - texp) * x + texp * z1
+            sigmas = get_sigmas(timesteps, noise_scheduler_copy, n_dim=model_input.ndim, dtype=model_input.dtype, device=model_input.device)
+            noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
         
-def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False, resize=False,
-          index_block_location=0, gen_image_every=10, num_train_epochs=10, device='cuda:1', height=1024, width=1024,
-          lr_scheduler_type='constant', print_shapes=False):
+            # Predict the noise residual
+            model_pred = transformer(
+                hidden_states=noisy_model_input,
+                timestep=timesteps,
+                encoder_hidden_states=prompt_embeds,
+                pooled_projections=pooled_prompt_embeds,
+                control_hidden_states=control_hidden_states,
+                return_dict=False,
+                index_block_location=index_block_location,
+                print_shapes=print_shapes,
+            )[0]
+            
+            weighting = compute_loss_weighting_for_sd3(weighting_scheme=time_sampling_params['weighting_scheme'], sigmas=sigmas)
+
+            target = noise - model_input
+
+            # Compute regular loss.
+            val_loss = torch.mean(
+                (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+                1,
+            )
+            val_loss = val_loss.mean()
+            val_loss_list.append(val_loss)
+        
+        curr_val_loss = sum(val_loss_list) / len(val_loss_list) 
+        writer.add_scalar('Val Loss', curr_val_loss.item(), global_step)
+    
+
+def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
+          index_block_location=0, gen_image_every=100, num_train_epochs=10, 
+          validate_every=10,
+          device='cuda:1', height=1024, width=1024,
+          lr_scheduler_type='constant', print_shapes=False, num_steps=None):
     # Increment run number until a new directory is found
     run_number = 0
     run_dir = f"{run_number}"
@@ -48,10 +157,13 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
     writer = SummaryWriter(log_dir=log_dir)
     
     weight_dtype = torch.float32
-    logit_mean = 0.0
-    logit_std = 1.0
-    mode_scale = 1.29
-    weighting_scheme = "logit_normal"
+    
+    time_sampling_params = {
+        "logit_mean": 0.0,
+        "logit_std": 1.0,
+        "mode_scale": 1.29,
+        "weighting_scheme": "logit_normal",
+    }
   
     lr_warmup_steps = 500
     lr_num_cycles = 2
@@ -77,7 +189,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
     )
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=2, shuffle=False)
             
     transformer = SD3CNModel.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers", 
@@ -95,16 +207,15 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
     )
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
     
-    pipe = SD3CNPipeline(transformer, noise_scheduler, vae, device)
+    pipe = SD3CNPipeline(transformer, vae, noise_scheduler_copy, device)
     
     # Disable gradient computation for VAE and text embedders
     for param in vae.parameters():
         param.requires_grad = False
-    # for param in transformer.parameters():
-    #     param.requires_grad = False
     for name, param in transformer.named_parameters():
-        if 'transformer_blocks.0' in name:
+        if f'transformer_blocks.{index_block_location}' in name:
             param.requires_grad = True
+            print(f"Setting {name} grad update to True")
         else:
             param.requires_grad = False
             
@@ -138,106 +249,20 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
     for epoch in range(num_train_epochs):
         with tqdm(train_loader, total=len(train_loader), desc=f"Epoch {epoch}") as pbar:
             for step, data in enumerate(pbar):
+                if step >= num_steps:
+                    break
                 # Show how model performs on test set
                 if global_step % gen_image_every == 0 and global_step != 0:
-                    print("Evaluating test")
-                    transformer.eval()
-                    control_next.eval()
-                    with torch.no_grad():
-                        for _i, test_data in enumerate(test_loader):
-                            prompt = test_data["prompt"][0]
-                            
-                            prompt_embeds = test_data["prompt_embeds"].to(device)
-                            pooled_prompt_embeds = test_data["pooled_prompt_embeds"].to(device)
-                            
-                            hint_img = test_data["hint"].to(device)
-                                
-                            # Generate image with control
-                            control_input = vae.encode(hint_img).latent_dist.sample()
-                            control_input = (control_input - vae.config.shift_factor) * vae.config.scaling_factor
-                            control_input = control_input.to(dtype=weight_dtype)
-                            
-                            img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_next, control_input, index_block_location, height=height, width=width)
-                            writer.add_image(f'Image_with_control_{_i}_{prompt}', img, global_step)
-                            
-                            # Also generate image without control    
-                            img = generate_image(pipe, prompt_embeds, pooled_prompt_embeds, None, None, index_block_location, height=height, width=width)
-                            writer.add_image(f'Image_no_control_{_i}_{prompt}', img, global_step)
-                            break
-                        
+                    log_test(test_loader, pipe, transformer, control_next, vae, writer, device, global_step, index_block_location, weight_dtype, height=height, width=width)
+                
                 # Show how model performs on validation set
-                if global_step % gen_image_every == 0 and global_step != 0:
-                    print("Evaluating validation")
-                    transformer.eval()
-                    control_next.eval()
-                    with torch.no_grad():
-                        val_loss_list = []
-                        for _i, valid_data in enumerate(valid_loader):
-                            pixel_values = valid_data['img'].to(device)
-                            hint_values = valid_data['hint'].to(device)
-                            prompt_embeds = valid_data["prompt_embeds"].to(device)
-                            pooled_prompt_embeds = valid_data["pooled_prompt_embeds"].to(device)
-                            
-                            model_input = vae.encode(pixel_values).latent_dist.sample()
-                            model_input = (model_input - vae.config.shift_factor) * vae.config.scaling_factor
-                            model_input = model_input.to(dtype=weight_dtype)
-                            
-                            control_input = vae.encode(hint_values).latent_dist.sample()
-                            control_input = (control_input - vae.config.shift_factor) * vae.config.scaling_factor
-                            control_input = control_input.to(dtype=weight_dtype)
-                            
-
-                            # Sample noise that we'll add to the latents
-                            noise = torch.randn_like(model_input)
-                            bsz = model_input.shape[0]
-                            # Sample a random timestep for each image
-                            # for weighting schemes where we sample timesteps non-uniformly
-                            u = compute_density_for_timestep_sampling(
-                                weighting_scheme=weighting_scheme,
-                                batch_size=bsz,
-                                logit_mean=logit_mean,
-                                logit_std=logit_std,
-                                mode_scale=mode_scale,
-                            )
-                            indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-                            timesteps = noise_scheduler_copy.timesteps[indices].to(device=model_input.device)
-                            
-                            # controlnet(s) inference
-                            control_hidden_states = control_next(control_input, timesteps)['output']
-
-                            # Add noise according to flow matching.
-                            # zt = (1 - texp) * x + texp * z1
-                            sigmas = get_sigmas(timesteps, noise_scheduler_copy, n_dim=model_input.ndim, dtype=model_input.dtype, device=model_input.device)
-                            noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
-                        
-                            # Predict the noise residual
-                            model_pred = transformer(
-                                hidden_states=noisy_model_input,
-                                timestep=timesteps,
-                                encoder_hidden_states=prompt_embeds,
-                                pooled_projections=pooled_prompt_embeds,
-                                control_hidden_states=control_hidden_states,
-                                return_dict=False,
-                                index_block_location=index_block_location,
-                                print_shapes=print_shapes,
-                            )[0]
-                            
-                            weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
-
-                            target = noise - model_input
-
-                            # Compute regular loss.
-                            val_loss = torch.mean(
-                                (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                                1,
-                            )
-                            val_loss = val_loss.mean()
-                            val_loss_list.append(val_loss)
-                        
-                        curr_val_loss = sum(val_loss_list) / len(val_loss_list) 
-                        writer.add_scalar('Val Loss', curr_val_loss.item(), global_step)
-                        
-                        
+                if global_step % validate_every == 0 and global_step != 0:
+                    log_validation(valid_loader, transformer, control_next, vae, noise_scheduler_copy, 
+                                   time_sampling_params, device, writer, global_step, index_block_location, 
+                                   weight_dtype, print_shapes=print_shapes,
+                                   height=height, width=width)
+                       
+                transformer.train() 
                 control_next.train()
                 
                 pixel_values = data['img'].to(device)
@@ -259,11 +284,11 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
                 # Sample a random timestep for each image
                 # for weighting schemes where we sample timesteps non-uniformly
                 u = compute_density_for_timestep_sampling(
-                    weighting_scheme=weighting_scheme,
+                    weighting_scheme=time_sampling_params["weighting_scheme"],
                     batch_size=bsz,
-                    logit_mean=logit_mean,
-                    logit_std=logit_std,
-                    mode_scale=mode_scale,
+                    logit_mean=time_sampling_params["logit_mean"],
+                    logit_std=time_sampling_params["logit_std"],
+                    mode_scale=time_sampling_params["mode_scale"],
                 )
                 indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
                 timesteps = noise_scheduler_copy.timesteps[indices].to(device=model_input.device)
@@ -274,12 +299,20 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
                 noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
 
                 # controlnet(s) inference
-                # use_controlnext_coin = np.random.rand() < 0.5
-                # control_hidden_states = None
-                # if control_next is not None and use_controlnext_coin:
-                #     control_hidden_states = control_next(control_input, timesteps)['output']
                 control_hidden_states = control_next(control_input, timesteps)['output']
-            
+                mask_ratio = 0.6
+                num_to_mask = int(batch_size * mask_ratio)
+
+                # Generate random indices for masking
+                indices = torch.randperm(batch_size)[:num_to_mask]
+
+                # Create a mask tensor (1 for masked, 0 for unmasked)
+                mask = torch.zeros(batch_size, dtype=torch.bool)
+                mask[indices] = True
+
+                # Apply the mask (set masked images to 0 or another value)
+                control_hidden_states[mask] = 0  # Replace masked images with zeros
+                
                 # Predict the noise residual
                 model_pred = transformer(
                     hidden_states=noisy_model_input,
@@ -310,7 +343,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
 
                 # these weighting schemes use a uniform timestep sampling
                 # and instead post-weight the loss
-                weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
+                weighting = compute_loss_weighting_for_sd3(weighting_scheme=time_sampling_params['weighting_scheme'], sigmas=sigmas)
 
                 target = noise - model_input
 
@@ -338,18 +371,19 @@ def train(base_log_dir="logs/sd3_training", run_type=None, use_controlnext=False
 
 if __name__ == '__main__':
     args = ArgumentParser()
-    args.add_argument("--use-controlnext", action="store_true")
     args.add_argument("--print-shapes", action="store_true")
     args.add_argument("--gen-image-every", type=int, default=100)
-    args.add_argument("--num-train-epochs", type=int, default=7000)
+    args.add_argument("--validate-every", type=int, default=10)
+    args.add_argument("--num-train-epochs", type=int, default=1)
+    args.add_argument("--num-steps", type=int, default=101)
+    args.add_argument("--index", type=int, default=0)
     args.add_argument("--lr-scheduler-type", type=str, default='constant')
     args.add_argument("--device", type=str, default='cuda:1')
     args = args.parse_args()
     
-    use_controlnext = args.use_controlnext
-    index = 0
-    train(base_log_dir='logs/sd3-5000', run_type=f"use-control-proba-high-lr", index_block_location=index, 
+    index = args.index
+    train(base_log_dir='logs/sd3-masked', run_type=f"mask=0.6-{index=}", index_block_location=index, 
           resize=True, lr_scheduler_type=args.lr_scheduler_type,
-          use_controlnext=use_controlnext, gen_image_every=args.gen_image_every, num_train_epochs=args.num_train_epochs, 
+          gen_image_every=args.gen_image_every, num_train_epochs=args.num_train_epochs, 
           print_shapes=args.print_shapes, device=args.device,
-          height=1024, width=1024)
+          height=1024, width=1024, num_steps=args.num_steps)

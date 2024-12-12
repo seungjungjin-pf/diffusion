@@ -87,12 +87,13 @@ def generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_next_model
                 height=height,
                 width=width,
                 guidance_scale=0.5)
-        
-    image = res.images[0]
+    image_list = res.images
+    image_list = [torch.tensor(np.asarray(image)).permute(2,0,1) for image in image_list]
     print("####Done generating image")
     
     # Display the final grid image
-    return torch.tensor(np.asarray(image)).permute(2,0,1)
+    # return torch.tensor(np.asarray(image)).permute(2,0,1)
+    return image_list
 
 
 # def cross_norm1(x_m, x_c, scale=0.1, control_scale=0.2):
