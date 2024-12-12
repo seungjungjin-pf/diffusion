@@ -9,3 +9,6 @@ weights/
 images/
 gen_images/
 secrets.txt
+
+*.pt
+tensors/
