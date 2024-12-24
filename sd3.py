@@ -194,9 +194,9 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
                 encoder_hidden_states, hidden_states = block(
                     hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
                 )
-            if print_shapes and index_block == 0:
-                print(f"Hidden states (latent) shape after block 0: {hidden_states.shape}")
-                print(f"Encoder hidden states shape after block 0: {encoder_hidden_states.shape}")
+            if print_shapes and index_block == index_block_location:
+                print(f"Hidden states (latent) shape after block {index_block}: {hidden_states.shape}")
+                print(f"Encoder hidden states shape after block {index_block}: {encoder_hidden_states.shape}")
             # # controlnet residual
             if index_block == index_block_location and block.context_pre_only is False:
                 norm = cross_norm1(hidden_states, control_hidden_states, scale=0.1, control_scale=0.2)

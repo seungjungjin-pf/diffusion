@@ -207,7 +207,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
     )
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
     
-    pipe = SD3CNPipeline(transformer, vae, noise_scheduler_copy, device)
+    pipe = SD3CNPipeline(transformer, noise_scheduler, vae, device)
     
     # Disable gradient computation for VAE and text embedders
     for param in vae.parameters():
@@ -219,7 +219,8 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
         else:
             param.requires_grad = False
             
-    control_next = ControlNeXtModel(upscale_dim=1536).to(device)
+    control_next = ControlNeXtModel().to(device)
+    # control_next = ControlNeXtModel().to(device)
     params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters())) + list(control_next.parameters())
     
     cn_model_params = sum([p.numel() for p in control_next.parameters()])
@@ -227,6 +228,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
     transformer_params = sum([p.numel() for p in transformer.parameters()])
     
     print(f"Transformer params: {transformer_params}, Trainable params: {trainable_params}, ControlNext params: {cn_model_params}")
+    
 
     optimizer = torch.optim.AdamW(
         params_to_optimize,
@@ -301,13 +303,13 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
                 # controlnet(s) inference
                 control_hidden_states = control_next(control_input, timesteps)['output']
                 mask_ratio = 0.6
-                num_to_mask = int(batch_size * mask_ratio)
+                num_to_mask = int(bsz * mask_ratio)
 
                 # Generate random indices for masking
-                indices = torch.randperm(batch_size)[:num_to_mask]
+                indices = torch.randperm(bsz)[:num_to_mask]
 
                 # Create a mask tensor (1 for masked, 0 for unmasked)
-                mask = torch.zeros(batch_size, dtype=torch.bool)
+                mask = torch.zeros(bsz, dtype=torch.bool)
                 mask[indices] = True
 
                 # Apply the mask (set masked images to 0 or another value)
@@ -376,7 +378,7 @@ if __name__ == '__main__':
     args.add_argument("--validate-every", type=int, default=10)
     args.add_argument("--num-train-epochs", type=int, default=1)
     args.add_argument("--num-steps", type=int, default=101)
-    args.add_argument("--index", type=int, default=0)
+    args.add_argument("--index", type=int, default=16)
     args.add_argument("--lr-scheduler-type", type=str, default='constant')
     args.add_argument("--device", type=str, default='cuda:1')
     args = args.parse_args()
@@ -385,5 +387,5 @@ if __name__ == '__main__':
     train(base_log_dir='logs/sd3-masked', run_type=f"mask=0.6-{index=}", index_block_location=index, 
           resize=True, lr_scheduler_type=args.lr_scheduler_type,
           gen_image_every=args.gen_image_every, num_train_epochs=args.num_train_epochs, 
-          print_shapes=args.print_shapes, device=args.device,
+          print_shapes=args.print_shapes, device=args.device, validate_every=args.validate_every,
           height=1024, width=1024, num_steps=args.num_steps)

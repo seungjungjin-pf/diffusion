@@ -97,13 +97,21 @@ def generate_image(pipe, prompt_embeds, pooled_prompt_embeds, control_next_model
 
 
 # def cross_norm1(x_m, x_c, scale=0.1, control_scale=0.2):
-def cross_norm1(x_m, x_c, scale=0.8, control_scale=0.8):
+# x_m: latent image
+# x_c: control image
+def cross_norm1(x_m, x_c, scale=1.0, control_scale=0.8):
     """Implementation from ControlNeXt github"""
-    mean_latents, std_latents = torch.mean(x_m, dim=(1, 2), keepdim=True), torch.std(x_m, dim=(1, 2), keepdim=True)
-    mean_control, std_control = torch.mean(x_c, dim=(1, 2), keepdim=True), torch.std(x_c, dim=(1, 2), keepdim=True)
+    # print(f"{x_m.shape=}, {x_c.shape=}")
+    # x_c = F.adaptive_avg_pool2d(x_c, x_m.shape[-2:])
+    # print(f"{x_c.shape=}")
+    mean_latents = torch.mean(x_m, dim=(1, 2), keepdim=True)
+    std_latents = torch.std(x_m, dim=(1, 2), keepdim=True)
     
-    conditional_controls = (x_c - mean_control) * (std_latents / (std_control + 1e-5)) + mean_latents
-    conditional_controls = F.adaptive_avg_pool2d(conditional_controls, x_m.shape[-2:])
+    mean_control = torch.mean(x_c, dim=(1, 2), keepdim=True)
+    std_control = torch.std(x_c, dim=(1, 2), keepdim=True)
+    
+    # import pdb; pdb.set_trace()
+    conditional_controls = (x_c - mean_control) * (std_latents / (std_control + 1e-12)) + mean_latents
 
     return x_m + conditional_controls * scale * control_scale
 
