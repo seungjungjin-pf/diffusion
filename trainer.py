@@ -34,6 +34,7 @@ def log_test(test_loader, pipe, transformer, control_next, vae, writer, device, 
     print("Evaluating test")
     transformer.eval()
     control_next.eval()
+        
     with torch.no_grad():
         for _, test_data in enumerate(test_loader):
             # batch_size = test_loader.batch_size
@@ -41,6 +42,14 @@ def log_test(test_loader, pipe, transformer, control_next, vae, writer, device, 
             prompt_embeds = test_data["prompt_embeds"].to(device)
             pooled_prompt_embeds = test_data["pooled_prompt_embeds"].to(device)
             hint_img = test_data["hint"].to(device)
+            if global_step == 0:
+                target_img1 = test_data["img"][0].to(device)
+                target_img2 = test_data["img"][1].to(device)
+                writer.add_image(f'With_control_0_{prompt[0]}', target_img1, global_step)
+                writer.add_image(f'With_control_1_{prompt[1]}', target_img2, global_step)
+                writer.add_image(f'Without_control_0_{prompt[0]}', target_img1, global_step)
+                writer.add_image(f'Without_control_1_{prompt[1]}', target_img2, global_step)
+                return
 
             # Generate image with control
             control_input = vae.encode(hint_img).latent_dist.sample()
@@ -148,7 +157,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
         run_dir = f"{run_type}_{run_dir}"
     while os.path.exists(os.path.join(base_log_dir, run_dir)):
         run_number += 1
-        run_dir = f"{run_number}"
+        run_dir = f"{run_number}".zfill(2)
         if run_type is not None:
             run_dir = f"{run_type}_{run_dir}"
 
@@ -213,7 +222,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
     for param in vae.parameters():
         param.requires_grad = False
     for name, param in transformer.named_parameters():
-        if f'transformer_blocks.{index_block_location}' in name:
+        if f'transformer_blocks.{index_block_location}.' in name:
             param.requires_grad = True
             print(f"Setting {name} grad update to True")
         else:
@@ -254,11 +263,11 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
                 if step >= num_steps:
                     break
                 # Show how model performs on test set
-                if global_step % gen_image_every == 0 and global_step != 0:
+                if global_step % gen_image_every == 0:
                     log_test(test_loader, pipe, transformer, control_next, vae, writer, device, global_step, index_block_location, weight_dtype, height=height, width=width)
                 
                 # Show how model performs on validation set
-                if global_step % validate_every == 0 and global_step != 0:
+                if global_step % validate_every == 0:
                     log_validation(valid_loader, transformer, control_next, vae, noise_scheduler_copy, 
                                    time_sampling_params, device, writer, global_step, index_block_location, 
                                    weight_dtype, print_shapes=print_shapes,
@@ -302,7 +311,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
 
                 # controlnet(s) inference
                 control_hidden_states = control_next(control_input, timesteps)['output']
-                mask_ratio = 0.6
+                mask_ratio = 0.5
                 num_to_mask = int(bsz * mask_ratio)
 
                 # Generate random indices for masking
@@ -383,9 +392,10 @@ if __name__ == '__main__':
     args.add_argument("--device", type=str, default='cuda:1')
     args = args.parse_args()
     
-    index = args.index
-    train(base_log_dir='logs/sd3-masked', run_type=f"mask=0.6-{index=}", index_block_location=index, 
-          resize=True, lr_scheduler_type=args.lr_scheduler_type,
-          gen_image_every=args.gen_image_every, num_train_epochs=args.num_train_epochs, 
-          print_shapes=args.print_shapes, device=args.device, validate_every=args.validate_every,
-          height=1024, width=1024, num_steps=args.num_steps)
+    # index = args.index
+    for index in range(1, 32):
+        train(base_log_dir='logs/sd3-coco', run_type=f"mask=0.5-{index=}", index_block_location=index, 
+            resize=True, lr_scheduler_type=args.lr_scheduler_type,
+            gen_image_every=args.gen_image_every, num_train_epochs=args.num_train_epochs, 
+            print_shapes=args.print_shapes, device=args.device, validate_every=args.validate_every,
+            height=1024, width=1024, num_steps=args.num_steps)

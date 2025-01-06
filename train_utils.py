@@ -113,7 +113,7 @@ def cross_norm1(x_m, x_c, scale=1.0, control_scale=0.8):
     # import pdb; pdb.set_trace()
     conditional_controls = (x_c - mean_control) * (std_latents / (std_control + 1e-12)) + mean_latents
 
-    return x_m + conditional_controls * scale * control_scale
+    return conditional_controls * scale * control_scale
 
 def cross_norm2(x_m, x_c, scale=0.1, control_scale=0.2):
     """Implementation from paper"""
