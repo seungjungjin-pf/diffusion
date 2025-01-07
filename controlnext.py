@@ -22,6 +22,7 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         groups = [4, 8],
         controlnext_scale=1.,
         embedding_input_dim = 16,
+        scale_factor=8,
     ):
         super().__init__()
 
@@ -92,7 +93,7 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         self.upscale_layer = None
         
         self.upsample = nn.Sequential(
-            nn.Upsample(scale_factor=4, mode='bilinear', align_corners=False),
+            nn.Upsample(scale_factor=scale_factor, mode='bilinear', align_corners=False),
             nn.Conv2d(320, 320, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
         )
@@ -131,7 +132,7 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         emb = self.time_embedding(t_emb)
 
         sample = self.embedding(sample)
-
+        
         for res, downsample in zip(self.down_res, self.down_sample):
             sample = res(sample, emb)
             sample = downsample(sample, emb)
@@ -139,15 +140,12 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
         sample = self.mid_convs[0](sample) + sample
         sample = self.mid_convs[1](sample)
         
-       
-       
-       # Projection to B x 4096 x 1536
+        # Projection to B x 4096 x 1536
         sample = self.upsample(sample)
         sample = self.channel_proj(sample)        
         B, C, H, W = sample.shape  # (B, 1536, 64, 64)
         sample = sample.view(B, C, H * W)  # => (B, 1536, 4096)
         sample = sample.permute(0, 2, 1) # tokens first
-
         
         return {
             'output': sample,

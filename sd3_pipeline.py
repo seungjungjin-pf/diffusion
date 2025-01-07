@@ -68,7 +68,7 @@ class SD3CNPipeline:
         scheduler: FlowMatchEulerDiscreteScheduler,
         vae: AutoencoderKL,
         device: Union[str, torch.device],
-        use_vae_scale_factor: bool = True,
+        image_size: Optional[int] = 1024,
     ):
         super().__init__()
 
@@ -77,11 +77,16 @@ class SD3CNPipeline:
         self.scheduler = scheduler
         self.device = device
        
-        self.vae_scale_factor = 1
-        if use_vae_scale_factor: 
-            self.vae_scale_factor = (
-                2 ** (len(self.vae.config.block_out_channels) - 1) if self.vae is not None else 8
-            )
+        if image_size == 1024:
+            self.vae_scale_factor = 4
+        elif image_size == 512:
+            self.vae_scale_factor = 8
+        else:
+            raise ValueError("Only image sizes of 1024 and 512 are supported.")
+        # if use_vae_scale_factor: 
+        #     self.vae_scale_factor = (
+        #         2 ** (len(self.vae.config.block_out_channels) - 1) if self.vae is not None else 8
+        #     )
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         
         self.default_sample_size = (
@@ -137,7 +142,6 @@ class SD3CNPipeline:
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
-
         latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
 
         return latents
@@ -307,7 +311,7 @@ class SD3CNPipeline:
             generator,
             latents,
         )
-
+        
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             index = 0
@@ -326,7 +330,6 @@ class SD3CNPipeline:
                     timestep=timestep,
                     encoder_hidden_states=prompt_embeds,
                     pooled_projections=pooled_prompt_embeds,
-                    joint_attention_kwargs=self.joint_attention_kwargs,
                     return_dict=False,
                     control_hidden_states=control_hidden_states,
                     index_block_location=index_block_location,

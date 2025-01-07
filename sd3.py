@@ -119,7 +119,6 @@ class SD3CNModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMix
         encoder_hidden_states: torch.FloatTensor = None,
         pooled_projections: torch.FloatTensor = None,
         timestep: torch.LongTensor = None,
-        joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
         control_hidden_states: torch.tensor = None,
         index_block_location: int = 0,

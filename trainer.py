@@ -152,12 +152,12 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
           lr_scheduler_type='constant', print_shapes=False, num_steps=None):
     # Increment run number until a new directory is found
     run_number = 0
-    run_dir = f"{run_number}"
+    run_dir = f"trial_{run_number}".zfill(2)
     if run_type is not None:
         run_dir = f"{run_type}_{run_dir}"
     while os.path.exists(os.path.join(base_log_dir, run_dir)):
         run_number += 1
-        run_dir = f"{run_number}".zfill(2)
+        run_dir = f"trial_{run_number}".zfill(2)
         if run_type is not None:
             run_dir = f"{run_type}_{run_dir}"
 
@@ -183,15 +183,20 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
     adam_beta2 = 0.999
     adam_weight_decay = 1e-4
     adam_epsilon = 1e-8
-    
-    resize = torchvision.transforms.Resize((1024,1024))
+   
+    resize = None
+    scale_factor = 4
+    batch_size = 16
+    if height == 1024: 
+        resize = torchvision.transforms.Resize((1024,1024))
+        scale_factor = 8
+        batch_size = 8
     dataset = PreLoadedFillDataset(transforms=resize)
     
     train_size = 4974
     valid_size = 24
     test_size = 2
     
-    batch_size = 8
 
     train_dataset, valid_dataset, test_dataset = random_split(
         dataset, [train_size, valid_size, test_size]
@@ -216,7 +221,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
     )
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
     
-    pipe = SD3CNPipeline(transformer, noise_scheduler, vae, device)
+    pipe = SD3CNPipeline(transformer, noise_scheduler, vae, device, image_size=height)
     
     # Disable gradient computation for VAE and text embedders
     for param in vae.parameters():
@@ -228,7 +233,7 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
         else:
             param.requires_grad = False
             
-    control_next = ControlNeXtModel().to(device)
+    control_next = ControlNeXtModel(scale_factor=scale_factor).to(device)
     # control_next = ControlNeXtModel().to(device)
     params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters())) + list(control_next.parameters())
     
@@ -377,7 +382,6 @@ def train(base_log_dir="logs/sd3_training", run_type=None, resize=False,
                 
                 global_step += 1
                 pbar.set_postfix(step=global_step, loss=loss.item())
-        
 
 
 if __name__ == '__main__':
@@ -390,12 +394,17 @@ if __name__ == '__main__':
     args.add_argument("--index", type=int, default=16)
     args.add_argument("--lr-scheduler-type", type=str, default='constant')
     args.add_argument("--device", type=str, default='cuda:1')
+    args.add_argument("--image-size", type=int, default=1024)
     args = args.parse_args()
     
     # index = args.index
     for index in range(1, 32):
-        train(base_log_dir='logs/sd3-coco', run_type=f"mask=0.5-{index=}", index_block_location=index, 
+        if index > 5:
+            break
+        index_str = str(index).zfill(2)
+        train(base_log_dir='logs/sd3-coco', run_type=f"mask=0.5-{index_str=}", index_block_location=index, 
             resize=True, lr_scheduler_type=args.lr_scheduler_type,
             gen_image_every=args.gen_image_every, num_train_epochs=args.num_train_epochs, 
             print_shapes=args.print_shapes, device=args.device, validate_every=args.validate_every,
-            height=1024, width=1024, num_steps=args.num_steps)
+            height=args.image_size, width=args.image_size, num_steps=args.num_steps)
+        
